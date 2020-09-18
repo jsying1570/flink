@@ -169,7 +169,9 @@ object FlinkBatchRuleSets {
     PushFilterIntoTableSourceScanRule.INSTANCE,
     PushFilterIntoLegacyTableSourceScanRule.INSTANCE,
     // push partition into the table scan
-    PushPartitionIntoLegacyTableSourceScanRule.INSTANCE
+    PushPartitionIntoLegacyTableSourceScanRule.INSTANCE,
+    // push partition into the dynamic table scan
+    PushPartitionIntoTableSourceScanRule.INSTANCE
   )
 
   /**
@@ -412,6 +414,7 @@ object FlinkBatchRuleSets {
     RemoveRedundantLocalSortAggRule.WITHOUT_SORT,
     RemoveRedundantLocalSortAggRule.WITH_SORT,
     RemoveRedundantLocalHashAggRule.INSTANCE,
+    BatchExecPythonAggregateRule.INSTANCE,
     // over agg
     BatchExecOverAggregateRule.INSTANCE,
     // window agg

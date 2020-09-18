@@ -26,11 +26,11 @@ import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
 import org.apache.flink.fnexecution.v1.FlinkFnApi;
 import org.apache.flink.python.PythonFunctionRunner;
-import org.apache.flink.streaming.api.operators.python.AbstractPythonFunctionOperator;
+import org.apache.flink.streaming.api.operators.python.AbstractOneInputPythonFunctionOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.functions.python.PythonFunctionInfo;
-import org.apache.flink.table.runtime.runners.python.beam.BeamPythonStatelessFunctionRunner;
+import org.apache.flink.table.runtime.runners.python.beam.BeamTablePythonStatelessFunctionRunner;
 import org.apache.flink.table.runtime.types.CRow;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.Row;
@@ -55,7 +55,7 @@ import java.util.stream.Collectors;
  */
 @Internal
 public abstract class AbstractStatelessFunctionOperator<IN, OUT, UDFIN>
-	extends AbstractPythonFunctionOperator<IN, OUT> {
+	extends AbstractOneInputPythonFunctionOperator<IN, OUT> {
 
 	private static final long serialVersionUID = 1L;
 
@@ -145,13 +145,14 @@ public abstract class AbstractStatelessFunctionOperator<IN, OUT, UDFIN>
 		IN value = element.getValue();
 		bufferInput(value);
 		processElementInternal(value);
+		elementCount++;
 		checkInvokeFinishBundleByCount();
 		emitResults();
 	}
 
 	@Override
 	public PythonFunctionRunner createPythonFunctionRunner() throws IOException {
-		return new BeamPythonStatelessFunctionRunner(
+		return new BeamTablePythonStatelessFunctionRunner(
 			getRuntimeContext().getTaskName(),
 			createPythonEnvironmentManager(),
 			userDefinedFunctionInputType,
@@ -185,7 +186,7 @@ public abstract class AbstractStatelessFunctionOperator<IN, OUT, UDFIN>
 	 * Buffers the specified input, it will be used to construct
 	 * the operator result together with the user-defined function execution result.
 	 */
-	public abstract void bufferInput(IN input);
+	public abstract void bufferInput(IN input) throws Exception;
 
 	public abstract UDFIN getFunctionInput(IN element);
 

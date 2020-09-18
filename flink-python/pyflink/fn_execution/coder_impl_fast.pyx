@@ -26,6 +26,7 @@ from libc.string cimport memcpy
 import datetime
 import decimal
 from pyflink.table import Row
+from pyflink.table.types import RowKind
 
 cdef class BaseCoderImpl:
     cpdef void encode_to_stream(self, value, LengthPrefixOutputStream output_stream):
@@ -53,6 +54,106 @@ cdef class TableFunctionRowCoderImpl(FlattenRowCoderImpl):
         if self._end_message:
             free(self._end_message)
 
+cdef class DataStreamStatelessFlatMapCoderImpl(BaseCoderImpl):
+
+    def __init__(self, field_coder):
+        self._single_field_coder = field_coder
+
+    cpdef void encode_to_stream(self, iter_value, LengthPrefixOutputStream output_stream):
+        if iter_value:
+            for value in iter_value:
+                self._single_field_coder.encode_to_stream(value, output_stream)
+
+    cpdef object decode_from_stream(self, LengthPrefixInputStream input_stream):
+        return self._single_field_coder.decode_from_stream(input_stream)
+
+cdef class DataStreamStatelessMapCoderImpl(FlattenRowCoderImpl):
+
+    def __init__(self, field_coder):
+        super(DataStreamStatelessMapCoderImpl, self).__init__([field_coder])
+        self._single_field_coder = self._field_coders[0]
+
+    cpdef void encode_to_stream(self, value, LengthPrefixOutputStream output_stream):
+        coder_type = self._single_field_coder.coder_type()
+        type_name = self._single_field_coder.type_name()
+        self._encode_field(coder_type, type_name, self._single_field_coder, value)
+        output_stream.write(self._tmp_output_data, self._tmp_output_pos)
+        self._tmp_output_pos = 0
+
+    cpdef void _encode_field(self, CoderType coder_type, TypeName field_type, FieldCoder field_coder,
+                        item):
+        if coder_type == SIMPLE:
+            self._encode_field_simple(field_type, item)
+            self._encode_data_stream_field_simple(field_type, item)
+        else:
+            self._encode_field_complex(field_type, field_coder, item)
+            self._encode_data_stream_field_complex(field_type, field_coder, item)
+
+    cpdef object _decode_field(self, CoderType coder_type, TypeName field_type,
+                        FieldCoder field_coder):
+        if coder_type == SIMPLE:
+            decoded_obj = self._decode_field_simple(field_type)
+            return decoded_obj if decoded_obj is not None \
+                else self._decode_data_stream_field_simple(field_type)
+        else:
+            decoded_obj = self._decode_field_complex(field_type, field_coder)
+            return decoded_obj if decoded_obj is not None \
+                else self._decode_data_stream_field_complex(field_type, field_coder)
+
+    cpdef object decode_from_stream(self, LengthPrefixInputStream input_stream):
+        input_stream.read(&self._input_data)
+        self._input_pos = 0
+        coder_type = self._single_field_coder.coder_type()
+        type_name = self._single_field_coder.type_name()
+        decoded_obj = self._decode_field(coder_type, type_name, self._single_field_coder)
+        return decoded_obj
+
+    cdef void _encode_data_stream_field_simple(self, TypeName field_type, item):
+        if field_type == PICKLED_BYTES:
+            import pickle
+            pickled_bytes = pickle.dumps(item)
+            self._encode_bytes(pickled_bytes, len(pickled_bytes))
+        elif field_type == BIG_DEC:
+            item_bytes = str(item).encode('utf-8')
+            self._encode_bytes(item_bytes, len(item_bytes))
+
+    cdef void _encode_data_stream_field_complex(self, TypeName field_type, FieldCoder field_coder,
+                                           item):
+        if field_type == TUPLE:
+            tuple_field_coders = (<TupleCoderImpl> field_coder).field_coders
+            tuple_field_count = len(tuple_field_coders)
+            tuple_value = list(item)
+            for i in range(tuple_field_count):
+                field_item = tuple_value[i]
+                tuple_field_coder = tuple_field_coders[i]
+                if field_item is not None:
+                    self._encode_field(tuple_field_coder.coder_type(),
+                                       tuple_field_coder.type_name(),
+                                       tuple_field_coder,
+                                       field_item)
+    cdef object _decode_data_stream_field_simple(self, TypeName field_type):
+        if field_type == PICKLED_BYTES:
+            decoded_bytes = self._decode_bytes()
+            import pickle
+            return pickle.loads(decoded_bytes)
+        elif field_type == BIG_DEC:
+            return decimal.Decimal(self._decode_bytes().decode("utf-8"))
+
+    cdef object _decode_data_stream_field_complex(self, TypeName field_type, FieldCoder field_coder):
+        if field_type == TUPLE:
+            tuple_field_coders = (<TupleCoderImpl> field_coder).field_coders
+            tuple_field_count = len(tuple_field_coders)
+            decoded_list = []
+            for i in range(tuple_field_count):
+                decoded_list.append(self._decode_field(
+                    tuple_field_coders[i].coder_type(),
+                    tuple_field_coders[i].type_name(),
+                    tuple_field_coders[i]
+                ))
+            return (*decoded_list,)
+
+ROW_KIND_BIT_SIZE = 2
+
 cdef class FlattenRowCoderImpl(BaseCoderImpl):
     def __init__(self, field_coders):
         self._field_coders = field_coders
@@ -60,13 +161,14 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
         self._field_type = <TypeName*> malloc(self._field_count * sizeof(TypeName))
         self._field_coder_type = <CoderType*> malloc(
             self._field_count * sizeof(CoderType))
-        self._leading_complete_bytes_num = self._field_count // 8
-        self._remaining_bits_num = self._field_count % 8
+        self._leading_complete_bytes_num = (self._field_count + ROW_KIND_BIT_SIZE) // 8
+        self._remaining_bits_num = (self._field_count + ROW_KIND_BIT_SIZE) % 8
         self._tmp_output_buffer_size = 1024
         self._tmp_output_pos = 0
         self._tmp_output_data = <char*> malloc(self._tmp_output_buffer_size)
-        self._null_byte_search_table = <unsigned char*> malloc(8 * sizeof(unsigned char))
-        self._null_mask = <bint*> malloc(self._field_count * sizeof(bint))
+        self._mask_byte_search_table = <unsigned char*> malloc(8 * sizeof(unsigned char))
+        self._row_kind_byte_table = <unsigned char*> malloc(8 * sizeof(unsigned char))
+        self._mask = <bint*> malloc((self._field_count + ROW_KIND_BIT_SIZE) * sizeof(bint))
         self._init_attribute()
         self.row = [None for _ in range(self._field_count)]
 
@@ -78,21 +180,23 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
         return self.row
 
     cdef void _init_attribute(self):
-        self._null_byte_search_table[0] = 0x80
-        self._null_byte_search_table[1] = 0x40
-        self._null_byte_search_table[2] = 0x20
-        self._null_byte_search_table[3] = 0x10
-        self._null_byte_search_table[4] = 0x08
-        self._null_byte_search_table[5] = 0x04
-        self._null_byte_search_table[6] = 0x02
-        self._null_byte_search_table[7] = 0x01
+        self._mask_byte_search_table[0] = 0x80
+        self._mask_byte_search_table[1] = 0x40
+        self._mask_byte_search_table[2] = 0x20
+        self._mask_byte_search_table[3] = 0x10
+        self._mask_byte_search_table[4] = 0x08
+        self._mask_byte_search_table[5] = 0x04
+        self._mask_byte_search_table[6] = 0x02
+        self._mask_byte_search_table[7] = 0x01
+        for i in range(2 ** ROW_KIND_BIT_SIZE):
+            self._row_kind_byte_table[i] = i << (8 - ROW_KIND_BIT_SIZE)
         for i in range(self._field_count):
             self._field_type[i] = self._field_coders[i].type_name()
             self._field_coder_type[i] = self._field_coders[i].coder_type()
 
     cdef void _encode_one_row(self, value, LengthPrefixOutputStream output_stream):
         cdef size_t i
-        self._write_null_mask(value, self._leading_complete_bytes_num, self._remaining_bits_num)
+        self._write_mask(value, self._leading_complete_bytes_num, self._remaining_bits_num, 0)
         for i in range(self._field_count):
             item = value[i]
             if item is not None:
@@ -104,9 +208,9 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
         output_stream.write(self._tmp_output_data, self._tmp_output_pos)
         self._tmp_output_pos = 0
 
-    cdef void _read_null_mask(self, bint*null_mask,
-                              size_t input_leading_complete_bytes_num,
-                              size_t input_remaining_bits_num):
+    cdef void _read_mask(self, bint*mask,
+                         size_t input_leading_complete_bytes_num,
+                         size_t input_remaining_bits_num):
         cdef size_t field_pos, i
         cdef unsigned char b
         field_pos = 0
@@ -114,14 +218,14 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
             b = self._input_data[self._input_pos]
             self._input_pos += 1
             for i in range(8):
-                null_mask[field_pos] = (b & self._null_byte_search_table[i]) > 0
+                mask[field_pos] = (b & self._mask_byte_search_table[i]) > 0
                 field_pos += 1
 
         if input_remaining_bits_num:
             b = self._input_data[self._input_pos]
             self._input_pos += 1
             for i in range(input_remaining_bits_num):
-                null_mask[field_pos] = (b & self._null_byte_search_table[i]) > 0
+                mask[field_pos] = (b & self._mask_byte_search_table[i]) > 0
                 field_pos += 1
 
     cdef void _decode_next_row(self, LengthPrefixInputStream input_stream):
@@ -129,10 +233,10 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
         cdef size_t length
         length = input_stream.read(&self._input_data)
         self._input_pos = 0
-        self._read_null_mask(self._null_mask, self._leading_complete_bytes_num,
-                             self._remaining_bits_num)
+        self._read_mask(self._mask, self._leading_complete_bytes_num,
+                        self._remaining_bits_num)
         for i in range(self._field_count):
-            if self._null_mask[i]:
+            if self._mask[i + ROW_KIND_BIT_SIZE]:
                 self.row[i] = None
             else:
                 if self._field_coder_type[i] == SIMPLE:
@@ -265,17 +369,21 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
             # Row
             row_field_coders = (<RowCoderImpl> field_coder).field_coders
             row_field_count = len(row_field_coders)
-            null_mask = <bint*> malloc(row_field_count * sizeof(bint))
-            leading_complete_bytes_num = row_field_count // 8
-            remaining_bits_num = row_field_count % 8
-            self._read_null_mask(null_mask, leading_complete_bytes_num, remaining_bits_num)
-            row = Row(*[None if null_mask[i] else
+            mask = <bint*> malloc((row_field_count + ROW_KIND_BIT_SIZE) * sizeof(bint))
+            leading_complete_bytes_num = (row_field_count + ROW_KIND_BIT_SIZE) // 8
+            remaining_bits_num = (row_field_count + ROW_KIND_BIT_SIZE) % 8
+            self._read_mask(mask, leading_complete_bytes_num, remaining_bits_num)
+            row = Row(*[None if mask[i + ROW_KIND_BIT_SIZE] else
                         self._decode_field(
                             row_field_coders[i].coder_type(),
                             row_field_coders[i].type_name(),
                             row_field_coders[i])
                         for i in range(row_field_count)])
-            free(null_mask)
+            row_kind_value = 0
+            for i in range(ROW_KIND_BIT_SIZE):
+                row_kind_value += mask[ROW_KIND_BIT_SIZE - i - 1] * 2 ** i
+            row.set_row_kind(RowKind(row_kind_value))
+            free(mask)
             return row
 
     cdef unsigned char _decode_byte(self) except? -1:
@@ -443,7 +551,8 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
             leading_complete_bytes_num = row_field_count // 8
             remaining_bits_num = row_field_count % 8
             row_value = list(item)
-            self._write_null_mask(row_value, leading_complete_bytes_num, remaining_bits_num)
+            row_kind_value = item._row_kind.value
+            self._write_mask(row_value, leading_complete_bytes_num, remaining_bits_num, row_kind_value)
             for i in range(row_field_count):
                 field_item = row_value[i]
                 row_field_coder = row_field_coders[i]
@@ -509,33 +618,43 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
             memcpy(self._tmp_output_data + self._tmp_output_pos, b, length)
         self._tmp_output_pos += length
 
-    cdef void _write_null_mask(self, value, size_t leading_complete_bytes_num,
-                               size_t remaining_bits_num):
+    cdef void _write_mask(self, value, size_t leading_complete_bytes_num,
+                          size_t remaining_bits_num, unsigned char row_kind_value):
         cdef size_t field_pos, index
-        cdef unsigned char*null_byte_search_table
+        cdef unsigned char*bit_map_byte_search_table
         cdef unsigned char b, i
         field_pos = 0
-        null_byte_search_table = self._null_byte_search_table
-        for _ in range(leading_complete_bytes_num):
+        bit_map_byte_search_table = self._mask_byte_search_table
+        field_count = self._field_count
+
+        # first byte contains the row kind bits
+        b = self._row_kind_byte_table[row_kind_value]
+        for i in range(0, 8 - ROW_KIND_BIT_SIZE):
+            if field_pos + i < field_count and value[field_pos + i] is None:
+                b |= bit_map_byte_search_table[i + ROW_KIND_BIT_SIZE]
+        field_pos += 8 - ROW_KIND_BIT_SIZE
+        self._encode_byte(b)
+
+        for _ in range(1, leading_complete_bytes_num):
             b = 0x00
             for i in range(8):
                 if value[field_pos + i] is None:
-                    b |= null_byte_search_table[i]
+                    b |= bit_map_byte_search_table[i]
             field_pos += 8
             self._encode_byte(b)
 
-        if remaining_bits_num:
+        if leading_complete_bytes_num >= 1 and remaining_bits_num:
             b = 0x00
             for i in range(remaining_bits_num):
                 if value[field_pos + i] is None:
-                    b |= null_byte_search_table[i]
+                    b |= bit_map_byte_search_table[i]
             self._encode_byte(b)
 
     def __dealloc__(self):
-        if self._null_mask:
-            free(self._null_mask)
-        if self._null_byte_search_table:
-            free(self._null_byte_search_table)
+        if self._mask:
+            free(self._mask)
+        if self._mask_byte_search_table:
+            free(self._mask_byte_search_table)
         if self._tmp_output_data:
             free(self._tmp_output_data)
         if self._field_type:
@@ -682,3 +801,27 @@ cdef class RowCoderImpl(FieldCoder):
 
     cpdef TypeName type_name(self):
         return ROW
+
+cdef class BigDecimalCoderImpl(FieldCoder):
+    cpdef CoderType coder_type(self):
+        return SIMPLE
+
+    cpdef TypeName type_name(self):
+        return BIG_DEC
+
+cdef class PickledBytesCoderImpl(FieldCoder):
+    cpdef CoderType coder_type(self):
+        return SIMPLE
+
+    cpdef TypeName type_name(self):
+        return PICKLED_BYTES
+
+cdef class TupleCoderImpl(FieldCoder):
+    def __cinit__(self, field_coders):
+        self.field_coders = field_coders
+
+    cpdef CoderType coder_type(self):
+        return COMPLEX
+
+    cpdef TypeName type_name(self):
+        return TUPLE

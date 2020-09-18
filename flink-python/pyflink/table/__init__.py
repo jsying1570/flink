@@ -37,6 +37,8 @@ Important classes of Flink Table API:
       Defines a list of data types available.
     - :class:`pyflink.table.Row`
       A row in a :class:`Table`.
+    - :class:`pyflink.table.Expression`
+      A column expression in a :class:`Table`.
     - :class:`pyflink.table.window`
       Helper classes for working with :class:`pyflink.table.window.GroupWindow`
       (:class:`pyflink.table.window.Tumble`, :class:`pyflink.table.window.Session`,
@@ -62,6 +64,7 @@ from __future__ import absolute_import
 
 from pyflink.table.environment_settings import EnvironmentSettings
 from pyflink.table.explain_detail import ExplainDetail
+from pyflink.table.expression import Expression
 from pyflink.table.module import Module
 from pyflink.table.result_kind import ResultKind
 from pyflink.table.sinks import CsvTableSink, TableSink, WriteMode
@@ -75,7 +78,7 @@ from pyflink.table.table_environment import (TableEnvironment, StreamTableEnviro
                                              BatchTableEnvironment)
 from pyflink.table.table_result import TableResult
 from pyflink.table.table_schema import TableSchema
-from pyflink.table.types import DataTypes, UserDefinedType, Row
+from pyflink.table.types import DataTypes, UserDefinedType, Row, RowKind
 from pyflink.table.udf import FunctionContext, ScalarFunction
 
 __all__ = [
@@ -85,6 +88,7 @@ __all__ = [
     'DataTypes',
     'EnvironmentSettings',
     'ExplainDetail',
+    'Expression',
     'FunctionContext',
     'GroupWindowedTable',
     'GroupedTable',
@@ -92,6 +96,7 @@ __all__ = [
     'OverWindowedTable',
     'ResultKind',
     'Row',
+    'RowKind',
     'ScalarFunction',
     'SqlDialect',
     'StatementSet',

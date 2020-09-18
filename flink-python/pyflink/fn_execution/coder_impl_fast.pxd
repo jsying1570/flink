@@ -25,6 +25,8 @@ cdef class BaseCoderImpl:
     cpdef void encode_to_stream(self, value, LengthPrefixOutputStream output_stream)
     cpdef decode_from_stream(self, LengthPrefixInputStream input_stream)
 
+cdef unsigned char ROW_KIND_BIT_SIZE
+
 cdef class FlattenRowCoderImpl(BaseCoderImpl):
     cdef readonly list _field_coders
     cdef TypeName*_field_type
@@ -33,8 +35,9 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
     cdef size_t _leading_complete_bytes_num
     cdef size_t _remaining_bits_num
 
-    cdef bint*_null_mask
-    cdef unsigned char*_null_byte_search_table
+    cdef bint*_mask
+    cdef unsigned char*_mask_byte_search_table
+    cdef unsigned char*_row_kind_byte_table
 
     # the tmp char pointer used to store encoded data of every row
     cdef char*_tmp_output_data
@@ -51,10 +54,10 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
     # initial attribute
     cdef void _init_attribute(self)
 
-    cdef void _write_null_mask(self, value, size_t leading_complete_bytes_num,
-                               size_t remaining_bits_num)
-    cdef void _read_null_mask(self, bint*null_mask, size_t leading_complete_bytes_num,
-                              size_t remaining_bits_num)
+    cdef void _write_mask(self, value, size_t leading_complete_bytes_num,
+                             size_t remaining_bits_num, unsigned char row_kind_value)
+    cdef void _read_mask(self, bint*null_mask, size_t leading_complete_bytes_num,
+                            size_t remaining_bits_num)
 
     # encode data to output_stream
     cdef void _encode_one_row(self, value, LengthPrefixOutputStream output_stream)
@@ -88,6 +91,17 @@ cdef class FlattenRowCoderImpl(BaseCoderImpl):
 cdef class TableFunctionRowCoderImpl(FlattenRowCoderImpl):
     cdef char* _end_message
 
+cdef class DataStreamStatelessMapCoderImpl(FlattenRowCoderImpl):
+    cdef readonly FieldCoder _single_field_coder
+    cdef object _decode_data_stream_field_simple(self, TypeName field_type)
+    cdef object _decode_data_stream_field_complex(self, TypeName field_type, FieldCoder field_coder)
+    cdef void _encode_data_stream_field_simple(self, TypeName field_type, item)
+    cdef void _encode_data_stream_field_complex(self, TypeName field_type, FieldCoder field_coder,
+                                                item)
+
+cdef class DataStreamStatelessFlatMapCoderImpl(BaseCoderImpl):
+    cdef readonly object _single_field_coder
+
 cdef enum CoderType:
     UNDEFINED = -1
     SIMPLE = 0
@@ -112,6 +126,9 @@ cdef enum TypeName:
     ARRAY = 14
     MAP = 15
     LOCAL_ZONED_TIMESTAMP = 16
+    PICKLED_BYTES = 17
+    BIG_DEC = 18
+    TUPLE = 19
 
 cdef class FieldCoder:
     cpdef CoderType coder_type(self)
@@ -150,6 +167,12 @@ cdef class DateCoderImpl(FieldCoder):
 cdef class TimeCoderImpl(FieldCoder):
     pass
 
+cdef class PickledBytesCoderImpl(FieldCoder):
+    pass
+
+cdef class BigDecimalCoderImpl(FieldCoder):
+    pass
+
 cdef class DecimalCoderImpl(FieldCoder):
     cdef readonly object context
     cdef readonly object scale_format
@@ -168,4 +191,7 @@ cdef class MapCoderImpl(FieldCoder):
     cdef readonly FieldCoder value_coder
 
 cdef class RowCoderImpl(FieldCoder):
+    cdef readonly list field_coders
+
+cdef class TupleCoderImpl(FieldCoder):
     cdef readonly list field_coders
